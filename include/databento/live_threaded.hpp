@@ -95,6 +95,8 @@ class LiveThreaded {
   void BlockForStop();
   KeepGoing BlockForStop(std::chrono::milliseconds timeout);
 
+  void SetTcpObserver(std::shared_ptr<TcpStatsObserver> o);
+
  private:
   friend LiveBuilder;
 

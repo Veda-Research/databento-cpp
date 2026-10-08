@@ -1,5 +1,9 @@
 #include "databento/detail/tcp_client.hpp"
 
+#include <chrono>
+
+#include "databento/tcp_stats_observer.hpp"
+
 #ifdef _WIN32
 #include <basetsd.h>   // SSIZE_T
 #include <winsock2.h>  // closesocket, recv, send, socket
@@ -17,8 +21,14 @@ using ssize_t = SSIZE_T;
 #include <cerrno>  // errno
 #endif
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+
 #include <algorithm>  // max
-#include <memory>     // unique_ptr
+#include <iostream>
+#include <memory>  // unique_ptr
 #include <sstream>
 #include <thread>
 #include <utility>  // move
@@ -135,6 +145,13 @@ ConnectResult ConnectTo(const ::addrinfo* addr, int timeout_ms) {
   if (fd.Get() == ScopedFd::kUnset) {
     return GetErrNo();
   }
+
+  int enabled = 1;
+  if (::setsockopt(fd.Get(), SOL_SOCKET, SO_TIMESTAMPNS, &enabled, sizeof(enabled)) <
+      0) {
+    std::cerr << "Failed to enable SO_TIMESTAMPNS: " << std::strerror(errno) << "\n";
+  }
+
   const int err_num = [&fd, addr, timeout_ms] {
     BlockingGuard guard{fd.Get()};
     if (::connect(fd.Get(), addr->ai_addr, addr->ai_addrlen) == 0) {
@@ -163,6 +180,66 @@ ConnectResult ConnectTo(const ::addrinfo* addr, int timeout_ms) {
   }
   return std::move(fd);
 }
+
+ssize_t recv_with_timestamp(int fd, char* buf, size_t max_size, int flags,
+                            databento::TcpStatsObserver::Metrics& metrics) {
+  struct iovec iov[1];
+  iov[0].iov_base = buf;
+  iov[0].iov_len = max_size;
+
+  char ctrl_buf[CMSG_SPACE(sizeof(struct timespec))];
+  std::memset(ctrl_buf, 0, sizeof(ctrl_buf));
+
+  struct msghdr msg;
+  std::memset(&msg, 0, sizeof(msg));
+  msg.msg_name = nullptr;
+  msg.msg_namelen = 0;
+  msg.msg_iov = iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = ctrl_buf;
+  msg.msg_controllen = sizeof(ctrl_buf);
+  msg.msg_flags = 0;
+
+  ssize_t bytes_received = ::recvmsg(fd, &msg, flags);
+
+  if (bytes_received > 0) {
+    std::int64_t kernel_ns = 0;
+    for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg != nullptr;
+         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+      if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_TIMESTAMPNS) {
+        struct timespec* kernel_ts =
+            reinterpret_cast<struct timespec*>(CMSG_DATA(cmsg));
+        kernel_ns = static_cast<std::int64_t>(kernel_ts->tv_sec) * 1000000000LL +
+                    kernel_ts->tv_nsec;
+        break;
+      }
+    }
+    if (kernel_ns > 0) {
+      auto now = std::chrono::system_clock::now();
+      std::int64_t user_ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch())
+              .count();
+      metrics.kernelToUserLatency = std::chrono::nanoseconds(user_ns - kernel_ns);
+    }
+
+    struct tcp_info info = {};
+    socklen_t len = sizeof(info);
+
+    if (getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &len) >= 0) {
+      metrics.rcvSpace = info.tcpi_rcv_space;
+      metrics.rcvSsthresh = info.tcpi_rcv_ssthresh;
+      metrics.rttEstimate = std::chrono::microseconds{info.tcpi_rcv_rtt};
+    }
+
+    int bytes_unread = 0;
+    if (ioctl(fd, FIONREAD, &bytes_unread) >= 0) {
+      metrics.bytesUnread = static_cast<std::uint64_t>(bytes_unread);
+    }
+  }
+
+  return bytes_received;
+}
+
 }  // namespace
 
 TcpClient::TcpClient(ILogReceiver* log_receiver, const std::string& gateway,
@@ -190,20 +267,31 @@ void TcpClient::WriteAll(const std::byte* buffer, std::size_t size) {
 }
 
 void TcpClient::ReadExact(std::byte* buffer, std::size_t size) {
-  const ::ssize_t res =
-      ::recv(socket_.Get(), reinterpret_cast<char*>(buffer), size, MSG_WAITALL);
+  TcpStatsObserver::Metrics metrics = {};
+  const ::ssize_t res = recv_with_timestamp(
+      socket_.Get(), reinterpret_cast<char*>(buffer), size, MSG_WAITALL, metrics);
   if (res != static_cast<::ssize_t>(size)) {
     throw TcpError{::GetErrNo(), "Error reading from socket"};
+  }
+
+  if (observer_) {
+    observer_->observe(metrics);
   }
 }
 
 databento::IReadable::Result TcpClient::ReadSome(std::byte* buffer,
                                                  std::size_t max_size) {
-  const ::ssize_t res =
-      ::recv(socket_.Get(), reinterpret_cast<char*>(buffer), max_size, {});
+  TcpStatsObserver::Metrics metrics = {};
+  const ::ssize_t res = recv_with_timestamp(
+      socket_.Get(), reinterpret_cast<char*>(buffer), max_size, 0, metrics);
   if (res < 0) {
     throw TcpError{::GetErrNo(), "Error reading from socket"};
   }
+
+  if (observer_) {
+    observer_->observe(metrics);
+  }
+
   return {static_cast<std::size_t>(res), res == 0 ? Status::Closed : Status::Ok};
 }
 

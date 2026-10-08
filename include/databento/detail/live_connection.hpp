@@ -39,6 +39,10 @@ class LiveConnection : IWritable {
   // Sets compression for subsequent reads.
   void SetCompression(Compression compression);
 
+  void SetTcpObserver(std::shared_ptr<TcpStatsObserver> o) {
+    client_.SetTcpObserver(std::move(o));
+  };
+
  private:
   TcpClient client_;
   std::optional<ZstdDecodeStream> zstd_stream_;

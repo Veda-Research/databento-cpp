@@ -263,3 +263,7 @@ LiveThreaded::ExceptionAction LiveThreaded::ExceptionHandler(
   impl->log_receiver->Receive(LogLevel::Error, log_ss.str());
   return ExceptionAction::Stop;
 }
+
+void LiveThreaded::SetTcpObserver(std::shared_ptr<TcpStatsObserver> o) {
+  impl_->blocking.SetTcpObserver(std::move(o));
+}

@@ -120,6 +120,10 @@ class LiveBlocking {
   // any. Usually performed after a `Reconnect()`.
   void Resubscribe();
 
+  void SetTcpObserver(std::shared_ptr<TcpStatsObserver> o) {
+    connection_.SetTcpObserver(std::move(o));
+  };
+
  private:
   friend LiveBuilder;
   friend LiveThreaded;

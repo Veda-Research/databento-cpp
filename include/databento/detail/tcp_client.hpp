@@ -3,11 +3,13 @@
 #include <chrono>  // milliseconds
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 
 #include "databento/detail/scoped_fd.hpp"  // ScopedFd
 #include "databento/ireadable.hpp"
+#include "databento/tcp_stats_observer.hpp"
 
 // Forward declare
 namespace databento {
@@ -38,10 +40,15 @@ class TcpClient {
   // Closes the socket.
   void Close();
 
+  void SetTcpObserver(std::shared_ptr<TcpStatsObserver> o) {
+    observer_ = std::move(o);
+  };
+
  private:
   static ScopedFd InitSocket(ILogReceiver* log_receiver, const std::string& gateway,
                              std::uint16_t port, RetryConf retry_conf);
 
   ScopedFd socket_;
+  std::shared_ptr<TcpStatsObserver> observer_;
 };
 }  // namespace databento::detail
