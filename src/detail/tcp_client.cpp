@@ -222,6 +222,7 @@ ssize_t recv_with_timestamp(int fd, char* buf, size_t max_size, int flags,
       metrics.kernelToUserLatency = std::chrono::nanoseconds(user_ns - kernel_ns);
     }
 
+#if 0
     struct tcp_info info = {};
     socklen_t len = sizeof(info);
 
@@ -235,6 +236,7 @@ ssize_t recv_with_timestamp(int fd, char* buf, size_t max_size, int flags,
     if (ioctl(fd, FIONREAD, &bytes_unread) >= 0) {
       metrics.bytesUnread = static_cast<std::uint64_t>(bytes_unread);
     }
+#endif
   }
 
   return bytes_received;
